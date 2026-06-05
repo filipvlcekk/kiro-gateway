@@ -517,6 +517,11 @@ ACCOUNTS_CONFIG_FILE: str = os.getenv("ACCOUNTS_CONFIG_FILE", "credentials.json"
 # Path to runtime state file
 ACCOUNTS_STATE_FILE: str = os.getenv("ACCOUNTS_STATE_FILE", "state.json")
 
+# Web UI configuration mode
+# - env_managed: Setup Wizard may update local .env
+# - platform_managed: PROXY_API_KEY is managed externally (Dokploy, Arcane, etc.)
+WEBUI_CONFIG_MODE: str = os.getenv("WEBUI_CONFIG_MODE", "env_managed").lower()
+
 # ==================================================================================================
 # Circuit Breaker Settings
 # ==================================================================================================
@@ -578,4 +583,3 @@ def get_kiro_api_host(region: str) -> str:
 def get_kiro_q_host(region: str) -> str:
     """Return Q API host for the specified region."""
     return KIRO_Q_HOST_TEMPLATE.format(region=region)
-

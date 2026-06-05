@@ -362,6 +362,27 @@ docker-compose logs -f
 curl http://localhost:8000/health
 ```
 
+### Recommended Persistence Model
+
+For Docker deployments, keep these responsibilities separate:
+
+- `PROXY_API_KEY`: managed by your platform environment or local `.env`
+- `credentials.json`: stored on a persistent volume
+- `state.json`: stored on the same persistent volume
+
+The default `docker-compose.yml` now uses:
+
+```yaml
+environment:
+  PROXY_API_KEY: ${PROXY_API_KEY}
+  ACCOUNTS_CONFIG_FILE: /app/data/credentials.json
+  ACCOUNTS_STATE_FILE: /app/data/state.json
+volumes:
+  - gateway-data:/app/data
+```
+
+This is the safest model for Dokploy and Arcane Git Sync, where project `.env` files may be regenerated or synced from an external source of truth.
+
 ### Docker Run (Without Compose)
 
 <details>
@@ -370,7 +391,10 @@ curl http://localhost:8000/health
 ```bash
 docker run -d \
   -p 8000:8000 \
+  -v kiro-gateway-data:/app/data \
   -e PROXY_API_KEY="my-super-secret-password-123" \
+  -e ACCOUNTS_CONFIG_FILE=/app/data/credentials.json \
+  -e ACCOUNTS_STATE_FILE=/app/data/state.json \
   -e REFRESH_TOKEN="your_refresh_token" \
   --name kiro-gateway \
   ghcr.io/jwadow/kiro-gateway:latest
@@ -385,9 +409,12 @@ docker run -d \
 ```bash
 docker run -d \
   -p 8000:8000 \
+  -v kiro-gateway-data:/app/data \
   -v ~/.aws/sso/cache:/home/kiro/.aws/sso/cache:ro \
   -e KIRO_CREDS_FILE=/home/kiro/.aws/sso/cache/kiro-auth-token.json \
   -e PROXY_API_KEY="my-super-secret-password-123" \
+  -e ACCOUNTS_CONFIG_FILE=/app/data/credentials.json \
+  -e ACCOUNTS_STATE_FILE=/app/data/state.json \
   --name kiro-gateway \
   ghcr.io/jwadow/kiro-gateway:latest
 ```
@@ -396,9 +423,12 @@ docker run -d \
 ```powershell
 docker run -d `
   -p 8000:8000 `
+  -v kiro-gateway-data:/app/data `
   -v ${HOME}/.aws/sso/cache:/home/kiro/.aws/sso/cache:ro `
   -e KIRO_CREDS_FILE=/home/kiro/.aws/sso/cache/kiro-auth-token.json `
   -e PROXY_API_KEY="my-super-secret-password-123" `
+  -e ACCOUNTS_CONFIG_FILE=/app/data/credentials.json `
+  -e ACCOUNTS_STATE_FILE=/app/data/state.json `
   --name kiro-gateway `
   ghcr.io/jwadow/kiro-gateway:latest
 ```
@@ -416,10 +446,13 @@ docker run -d -p 8000:8000 --env-file .env --name kiro-gateway ghcr.io/jwadow/ki
 
 ### Docker Compose Configuration
 
-Edit `docker-compose.yml` and uncomment volume mounts for your OS:
+Edit `docker-compose.yml` and uncomment credential mounts for your OS. Keep the persistent `/app/data` volume in place:
 
 ```yaml
 volumes:
+  # Persistent gateway state
+  - gateway-data:/app/data
+
   # Kiro IDE credentials (choose your OS)
   - ~/.aws/sso/cache:/home/kiro/.aws/sso/cache:ro              # Linux/macOS
   # - ${USERPROFILE}/.aws/sso/cache:/home/kiro/.aws/sso/cache:ro  # Windows
@@ -431,6 +464,12 @@ volumes:
   # Debug logs (optional)
   - ./debug_logs:/app/debug_logs
 ```
+
+### Dokploy and Arcane
+
+- **Dokploy**: prefer `PROXY_API_KEY` from the Dokploy environment UI and keep `/app/data` on a persistent volume.
+- **Arcane Git Sync**: treat `.env` as sync-managed project state, not as runtime storage. Keep `credentials.json` and `state.json` on `/app/data`.
+- In both cases, set `WEBUI_CONFIG_MODE=platform_managed` if the platform owns `PROXY_API_KEY`.
 
 ### Management Commands
 
@@ -446,7 +485,7 @@ docker-compose pull && docker-compose up -d  # Update
 
 ```bash
 docker build -t kiro-gateway .
-docker run -d -p 8000:8000 --env-file .env kiro-gateway
+docker run -d -p 8000:8000 -v kiro-gateway-data:/app/data --env-file .env kiro-gateway
 ```
 
 </details>

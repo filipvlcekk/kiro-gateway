@@ -45,6 +45,7 @@ import json
 import logging
 import sys
 import os
+from json import JSONDecodeError
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -207,6 +208,56 @@ if VPN_PROXY_URL:
 
 
 # --- Configuration Validation ---
+INSECURE_DEFAULT_PROXY_API_KEY = "my-super-secret-password-123"
+
+
+def _has_secure_proxy_api_key(api_key: str) -> bool:
+    """
+    Check whether the configured proxy API key is non-empty and not the default placeholder.
+
+    Args:
+        api_key: Proxy API key value.
+
+    Returns:
+        True when the key is suitable for runtime use.
+    """
+    return bool(api_key and api_key != INSECURE_DEFAULT_PROXY_API_KEY)
+
+
+def _credentials_file_has_configured_accounts(credentials_path: Path) -> bool:
+    """
+    Check whether credentials.json contains at least one valid enabled account entry.
+
+    Args:
+        credentials_path: Path to credentials.json.
+
+    Returns:
+        True when at least one usable credentials entry is present.
+    """
+    if not credentials_path.exists():
+        return False
+
+    try:
+        data = json.loads(credentials_path.read_text(encoding="utf-8"))
+    except (OSError, JSONDecodeError):
+        return False
+
+    if not isinstance(data, list):
+        return False
+
+    for entry in data:
+        if not isinstance(entry, dict) or not entry.get("enabled", True):
+            continue
+
+        credential_type = entry.get("type")
+        if credential_type == "refresh_token" and entry.get("refresh_token"):
+            return True
+        if credential_type in {"json", "sqlite"} and entry.get("path"):
+            return True
+
+    return False
+
+
 def validate_configuration() -> bool:
     """
     Validates that required configuration is present.
@@ -222,13 +273,15 @@ def validate_configuration() -> bool:
     Returns:
         bool: True if setup is required, False otherwise.
     """
-    # Priority 1: Check if credentials.json exists (Account System)
-    # If it exists, legacy .env validation is skipped
     from kiro.config import ACCOUNTS_CONFIG_FILE
     creds_json_path = Path(ACCOUNTS_CONFIG_FILE)
-    
-    if creds_json_path.exists():
-        logger.debug(f"Found {ACCOUNTS_CONFIG_FILE}, skipping legacy .env validation")
+
+    if not _has_secure_proxy_api_key(PROXY_API_KEY):
+        logger.warning("Proxy API key is missing or uses the insecure default. Enabling Setup Mode.")
+        return True
+
+    if _credentials_file_has_configured_accounts(creds_json_path):
+        logger.debug(f"Found configured accounts in {ACCOUNTS_CONFIG_FILE}, skipping legacy .env validation")
         return False
     
     # Priority 2: credentials.json doesn't exist - validate legacy .env variables
@@ -302,7 +355,7 @@ def validate_configuration() -> bool:
             )
     
     # Print errors and exit if any
-    if errors or PROXY_API_KEY == "my-super-secret-password-123" or not PROXY_API_KEY:
+    if errors:
         logger.warning("Configuration validation failed or default API key used. Enabling Setup Mode.")
         return True
     return False
@@ -494,12 +547,10 @@ async def lifespan(app: FastAPI):
             logger.error("Failed to initialize any account. Check your credentials.")
             raise RuntimeError("Failed to initialize any account")
             
-    except Exception as e:
+    except RuntimeError as e:
         logger.error(f"AccountManager initialization failed: {e}")
-        if getattr(app.state, "setup_required", False):
-            logger.warning("Continuing in Setup Mode...")
-        else:
-            raise RuntimeError("Failed to initialize any account")
+        app.state.setup_required = True
+        logger.warning("Continuing in Setup Mode...")
     
     # Save initial state
     await app.state.account_manager._save_state()
@@ -509,7 +560,10 @@ async def lifespan(app: FastAPI):
         app.state.account_manager.save_state_periodically()
     )
     
-    logger.info("Account system initialized successfully")
+    if getattr(app.state, "setup_required", False):
+        logger.info("Application started in Setup Mode")
+    else:
+        logger.info("Account system initialized successfully")
     
     yield
     

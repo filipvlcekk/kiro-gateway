@@ -614,14 +614,14 @@ class TestLifespanAccountManagerInit:
         print("✓ Full circle initialization was attempted")
     
     @pytest.mark.asyncio
-    async def test_lifespan_exit_if_no_accounts(self, tmp_path, monkeypatch):
+    async def test_lifespan_enters_setup_mode_if_no_accounts(self, tmp_path, monkeypatch):
         """
-        Test 102: RuntimeError если нет аккаунтов в credentials.json
-        
-        What it does: Verifies application raises RuntimeError if no accounts configured
-        Purpose: Prevent startup with empty configuration
+        Test 102: Setup mode if there are no configured accounts
+
+        What it does: Verifies application does not crash when no accounts are configured
+        Purpose: Allow WebUI setup flow to recover from empty account configuration
         """
-        print("\n=== Test 102: RuntimeError if no accounts configured ===")
+        print("\n=== Test 102: Setup mode if no accounts configured ===")
         
         # Arrange: Patch constants
         monkeypatch.setattr("main.ACCOUNT_SYSTEM", True)
@@ -646,22 +646,21 @@ class TestLifespanAccountManagerInit:
                 
                 from main import lifespan, app
                 
-                # Assert: RuntimeError is raised
-                with pytest.raises(RuntimeError, match="No accounts configured"):
-                    async with lifespan(app):
-                        pass
-                
-                print("✓ RuntimeError was raised for empty accounts")
+                app.state.setup_required = False
+                async with lifespan(app):
+                    assert app.state.setup_required is True
+
+                print("✓ Application entered setup mode for empty accounts")
     
     @pytest.mark.asyncio
-    async def test_lifespan_exit_if_all_failed(self, tmp_path, monkeypatch):
+    async def test_lifespan_enters_setup_mode_if_all_failed(self, tmp_path, monkeypatch):
         """
-        Test 103: RuntimeError если все аккаунты не инициализировались
-        
-        What it does: Verifies application raises RuntimeError if all accounts fail to initialize
-        Purpose: Prevent startup without any working accounts
+        Test 103: Setup mode if all accounts fail initialization
+
+        What it does: Verifies application does not crash when all accounts fail to initialize
+        Purpose: Allow recovery through the WebUI instead of aborting startup
         """
-        print("\n=== Test 103: RuntimeError if all accounts failed ===")
+        print("\n=== Test 103: Setup mode if all accounts failed ===")
         
         # Arrange: Patch constants
         monkeypatch.setattr("main.ACCOUNT_SYSTEM", True)
@@ -690,12 +689,11 @@ class TestLifespanAccountManagerInit:
                 
                 from main import lifespan, app
                 
-                # Assert: RuntimeError is raised
-                with pytest.raises(RuntimeError, match="Failed to initialize any account"):
-                    async with lifespan(app):
-                        pass
-                
-                print("✓ RuntimeError was raised when all accounts failed")
+                app.state.setup_required = False
+                async with lifespan(app):
+                    assert app.state.setup_required is True
+
+                print("✓ Application entered setup mode when all accounts failed")
     
     @pytest.mark.asyncio
     async def test_lifespan_save_initial_state(self, tmp_path, monkeypatch):

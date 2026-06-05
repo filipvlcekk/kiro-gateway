@@ -8,6 +8,7 @@ Verifies loading settings from environment variables.
 import pytest
 import os
 from unittest.mock import patch
+from pathlib import Path
 
 
 class TestLogLevelConfig:
@@ -176,6 +177,42 @@ class TestToolDescriptionMaxLengthConfig:
             
             print(f"TOOL_DESCRIPTION_MAX_LENGTH: {config_module.TOOL_DESCRIPTION_MAX_LENGTH}")
             assert config_module.TOOL_DESCRIPTION_MAX_LENGTH == 0
+
+
+class TestWebUIConfigMode:
+    """Tests for WEBUI_CONFIG_MODE configuration."""
+
+    def test_default_webui_config_mode_is_env_managed(self):
+        """
+        What it does: Verifies WEBUI_CONFIG_MODE defaults to env_managed.
+        Purpose: Ensure local installs keep working without extra configuration.
+        """
+        print("Setup: Removing WEBUI_CONFIG_MODE from environment...")
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("WEBUI_CONFIG_MODE", None)
+
+            import importlib
+            import kiro.config as config_module
+            importlib.reload(config_module)
+
+            print(f"WEBUI_CONFIG_MODE: {config_module.WEBUI_CONFIG_MODE}")
+            assert config_module.WEBUI_CONFIG_MODE == "env_managed"
+
+    def test_webui_config_mode_from_environment(self):
+        """
+        What it does: Verifies WEBUI_CONFIG_MODE is loaded from the environment.
+        Purpose: Ensure Docker platforms can switch the WebUI into platform-managed mode.
+        """
+        print("Setup: Setting WEBUI_CONFIG_MODE=platform_managed...")
+
+        with patch.dict(os.environ, {"WEBUI_CONFIG_MODE": "platform_managed"}):
+            import importlib
+            import kiro.config as config_module
+            importlib.reload(config_module)
+
+            print(f"WEBUI_CONFIG_MODE: {config_module.WEBUI_CONFIG_MODE}")
+            assert config_module.WEBUI_CONFIG_MODE == "platform_managed"
 
 
 class TestTimeoutConfigurationWarning:
@@ -969,3 +1006,44 @@ class TestAccountSystemConfig:
         
         print(f"Comparing STATE_SAVE_INTERVAL_SECONDS: Expected 10, Got {config_module.STATE_SAVE_INTERVAL_SECONDS}")
         assert config_module.STATE_SAVE_INTERVAL_SECONDS == 10
+
+
+class TestContainerDeploymentFiles:
+    """Tests for Docker deployment file defaults."""
+
+    def test_docker_compose_mounts_persistent_app_data_volume(self):
+        """
+        What it does: Verifies docker-compose mounts persistent app data to /app/data.
+        Purpose: Ensure credentials.json and state.json survive container recreation.
+        """
+        print("Setup: Reading docker-compose.yml...")
+
+        compose_content = Path("docker-compose.yml").read_text(encoding="utf-8")
+
+        print("Verification: Checking for /app/data volume mount...")
+        assert "gateway-data:/app/data" in compose_content
+
+    def test_docker_compose_sets_account_file_paths_to_app_data(self):
+        """
+        What it does: Verifies docker-compose points account files into /app/data.
+        Purpose: Ensure runtime account state is stored on the persistent volume.
+        """
+        print("Setup: Reading docker-compose.yml...")
+
+        compose_content = Path("docker-compose.yml").read_text(encoding="utf-8")
+
+        print("Verification: Checking ACCOUNTS_CONFIG_FILE and ACCOUNTS_STATE_FILE...")
+        assert "ACCOUNTS_CONFIG_FILE=/app/data/credentials.json" in compose_content
+        assert "ACCOUNTS_STATE_FILE=/app/data/state.json" in compose_content
+
+    def test_dockerfile_prepares_app_data_directory_for_runtime_state(self):
+        """
+        What it does: Verifies Dockerfile creates the /app/data directory.
+        Purpose: Ensure the non-root runtime has a stable mount target for persistent data.
+        """
+        print("Setup: Reading Dockerfile...")
+
+        dockerfile_content = Path("Dockerfile").read_text(encoding="utf-8")
+
+        print("Verification: Checking for /app/data directory creation...")
+        assert "mkdir -p debug_logs /app/data" in dockerfile_content

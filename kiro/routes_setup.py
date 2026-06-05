@@ -18,44 +18,44 @@
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 """
-WebUI routes: Setup Wizard and Admin Dashboard.
+WebUI routes: Setup Wizard, login, and Admin Dashboard.
 
 Provides:
-- `api_setup_guard_middleware`: blocks /v1/* access until setup completes.
-- `setup_router`: FastAPI router with /setup and /admin endpoints.
+- `api_setup_guard_middleware`: blocks `/v1/*` access until setup completes
+- `setup_router`: WebUI routes for setup, login, and account management
 """
 
+import hashlib
+import hmac
 import json
 import os
-import re
+import time
 from pathlib import Path
+from typing import Callable, Optional
 
-from fastapi import APIRouter, Form, Request, status
+from fastapi import APIRouter, Form, Request, Response, status
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from loguru import logger
 
-from kiro.config import ACCOUNTS_CONFIG_FILE
+from kiro.config import ACCOUNTS_CONFIG_FILE, PROXY_API_KEY, WEBUI_CONFIG_MODE
 
 
-# ==================================================================================================
-# Middleware
-# ==================================================================================================
+INSECURE_DEFAULT_PROXY_API_KEY = "my-super-secret-password-123"
+SESSION_COOKIE_NAME = "session"
+SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60
+WEBUI_ENV_FILE = Path(".env")
 
-async def api_setup_guard_middleware(request: Request, call_next):
+
+async def api_setup_guard_middleware(request: Request, call_next: Callable) -> Response:
     """
-    Block access to /v1/* endpoints if setup is required.
-
-    When the gateway is unconfigured (no credentials.json, no .env), this
-    middleware returns a 403 with a helpful message pointing the user to
-    the /setup page instead of letting requests fail with cryptic errors.
+    Block access to `/v1/*` endpoints if setup is required.
 
     Args:
         request: Incoming HTTP request.
-        call_next: Next middleware/handler in the chain.
+        call_next: Next middleware or route handler.
 
     Returns:
-        Either a 403 JSON response (when setup required) or the result of
-        `call_next(request)`.
+        Either a 403 JSON response for blocked API requests or the downstream response.
     """
     is_setup_required = getattr(request.app.state, "setup_required", False)
 
@@ -77,23 +77,176 @@ async def api_setup_guard_middleware(request: Request, call_next):
     return await call_next(request)
 
 
-# ==================================================================================================
-# Router
-# ==================================================================================================
-
 setup_router = APIRouter(tags=["WebUI"])
 
 
-def get_html_template(title: str, content: str) -> str:
+def _get_proxy_api_key() -> str:
+    """
+    Return the current effective WebUI/API secret.
+
+    Returns:
+        The active proxy API key, preferring runtime environment updates.
+    """
+    env_api_key = os.environ.get("PROXY_API_KEY")
+    if env_api_key:
+        return env_api_key
+    return PROXY_API_KEY
+
+
+def _has_secure_proxy_api_key() -> bool:
+    """
+    Check whether the current proxy API key is non-empty and not the insecure default.
+
+    Returns:
+        True when the current key is safe enough to use for WebUI auth.
+    """
+    api_key = _get_proxy_api_key()
+    return bool(api_key and api_key != INSECURE_DEFAULT_PROXY_API_KEY)
+
+
+def _is_platform_managed_mode() -> bool:
+    """
+    Check whether the WebUI should treat the proxy key as externally managed.
+
+    Returns:
+        True when `.env` must not be modified by the Setup Wizard.
+    """
+    return WEBUI_CONFIG_MODE == "platform_managed"
+
+
+def _build_session_token(api_key: str) -> str:
+    """
+    Build a signed session token.
+
+    Args:
+        api_key: Secret used to sign the session.
+
+    Returns:
+        Signed token containing an expiry timestamp.
+    """
+    expires_at = int(time.time()) + SESSION_MAX_AGE_SECONDS
+    payload = str(expires_at)
+    signature = hmac.new(api_key.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    return f"{payload}.{signature}"
+
+
+def _is_valid_session_token(token: Optional[str]) -> bool:
+    """
+    Validate a signed session token.
+
+    Args:
+        token: Session cookie value.
+
+    Returns:
+        True when the token is well-formed, unexpired, and signed by the current key.
+    """
+    if not token:
+        return False
+
+    parts = token.split(".", 1)
+    if len(parts) != 2:
+        return False
+
+    expires_at_raw, signature = parts
+    if not expires_at_raw.isdigit():
+        return False
+
+    expires_at = int(expires_at_raw)
+    if expires_at < int(time.time()):
+        return False
+
+    api_key = _get_proxy_api_key()
+    expected_signature = hmac.new(
+        api_key.encode("utf-8"),
+        expires_at_raw.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return hmac.compare_digest(signature, expected_signature)
+
+
+def _is_webui_authenticated(request: Request) -> bool:
+    """
+    Check WebUI authentication via bearer header or signed session cookie.
+
+    Args:
+        request: Incoming HTTP request.
+
+    Returns:
+        True when the request is authenticated for WebUI use.
+    """
+    auth_header = request.headers.get("Authorization")
+    if auth_header and auth_header == f"Bearer {_get_proxy_api_key()}":
+        return True
+
+    return _is_valid_session_token(request.cookies.get(SESSION_COOKIE_NAME))
+
+
+def _set_session_cookie(response: Response, api_key: str) -> None:
+    """
+    Set the WebUI session cookie on a response.
+
+    Args:
+        response: Response object to mutate.
+        api_key: Secret used to sign the session.
+    """
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=_build_session_token(api_key),
+        max_age=SESSION_MAX_AGE_SECONDS,
+        httponly=True,
+        samesite="lax",
+    )
+
+
+def _write_env_settings(env_path: Path, api_key: str) -> None:
+    """
+    Update or create `.env` entries used by the local setup flow.
+
+    Args:
+        env_path: Target `.env` file path.
+        api_key: Proxy API key to store.
+    """
+    lines: list[str] = []
+    if env_path.exists():
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+
+    updates = {
+        "PROXY_API_KEY": f'"{api_key}"',
+        "ACCOUNT_SYSTEM": "true",
+    }
+    seen_keys: set[str] = set()
+    output_lines: list[str] = []
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in line:
+            output_lines.append(line)
+            continue
+
+        key, _, _value = line.partition("=")
+        if key in updates:
+            output_lines.append(f"{key}={updates[key]}")
+            seen_keys.add(key)
+        else:
+            output_lines.append(line)
+
+    for key, value in updates.items():
+        if key not in seen_keys:
+            output_lines.append(f"{key}={value}")
+
+    env_path.write_text("\n".join(output_lines) + "\n", encoding="utf-8")
+
+
+def _render_page(title: str, content: str) -> str:
     """
     Build a complete HTML page using Tailwind CSS.
 
     Args:
-        title: Page title shown in the browser tab.
-        content: Body content (already wrapped in a card div).
+        title: Browser title.
+        content: Inner card content.
 
     Returns:
-        A full HTML document string.
+        Full HTML page markup.
     """
     return f"""
 <!DOCTYPE html>
@@ -113,43 +266,136 @@ def get_html_template(title: str, content: str) -> str:
 """
 
 
-@setup_router.get("/", response_class=RedirectResponse)
-async def root_redirect(request: Request):
+def _login_redirect() -> RedirectResponse:
     """
-    Redirect / to /setup (when setup required) or /admin (otherwise).
+    Create a redirect to the WebUI login page.
+
+    Returns:
+        Redirect response pointing to `/login`.
+    """
+    return RedirectResponse(url="/login", status_code=status.HTTP_303_SEE_OTHER)
+
+
+def _credentials_from_form(auth_type: str, auth_value: Optional[str], auth_value_rt: Optional[str], auth_value_sqlite: Optional[str]) -> Optional[dict]:
+    """
+    Convert setup/admin form input into a credentials.json entry.
+
+    Args:
+        auth_type: Selected credential type.
+        auth_value: Active field value.
+        auth_value_rt: Refresh token fallback field.
+        auth_value_sqlite: SQLite path fallback field.
+
+    Returns:
+        A credentials entry dict or None if the form did not provide a usable value.
+    """
+    actual_value = auth_value or auth_value_rt or auth_value_sqlite
+    if not actual_value:
+        return None
+
+    if auth_type == "refresh_token":
+        return {"type": "refresh_token", "refresh_token": actual_value}
+    if auth_type == "sqlite":
+        return {"type": "sqlite", "path": actual_value}
+    return None
+
+
+@setup_router.get("/", response_class=RedirectResponse)
+async def root_redirect(request: Request) -> RedirectResponse:
+    """
+    Redirect `/` to `/setup` or `/admin` based on setup state.
 
     Args:
         request: Incoming HTTP request.
 
     Returns:
-        RedirectResponse to the appropriate page.
+        Redirect response.
     """
     if getattr(request.app.state, "setup_required", False):
         return RedirectResponse(url="/setup")
     return RedirectResponse(url="/admin")
 
 
-@setup_router.get("/setup", response_class=HTMLResponse)
-async def setup_page(request: Request):
+@setup_router.get("/login", response_class=HTMLResponse)
+async def login_page(request: Request) -> Response:
     """
-    Render the Setup Wizard page.
-
-    Redirects to /admin if setup is already complete.
+    Render the WebUI login page.
 
     Args:
         request: Incoming HTTP request.
 
     Returns:
-        HTMLResponse with the setup form, or RedirectResponse to /admin.
+        HTML login page or redirect if the user is already authenticated.
+    """
+    if getattr(request.app.state, "setup_required", False):
+        return RedirectResponse(url="/setup")
+
+    if _is_webui_authenticated(request):
+        return RedirectResponse(url="/admin")
+
+    content = """
+<h2 class="text-2xl font-bold mb-2 text-gray-800">Web UI Login</h2>
+<p class="text-sm text-gray-600 mb-6">Enter your gateway admin password.</p>
+<form action="/login" method="post" class="space-y-4">
+    <div>
+        <label class="block text-sm font-medium text-gray-700">Admin Password</label>
+        <input type="password" name="api_key" required
+               class="mt-1 block w-full rounded-md border border-gray-300 shadow-sm p-2 focus:ring-blue-500 focus:border-blue-500">
+    </div>
+    <button type="submit"
+            class="w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700">
+        Sign In
+    </button>
+</form>
+"""
+    return HTMLResponse(content=_render_page("Web UI Login", content))
+
+
+@setup_router.post("/login")
+async def process_login(api_key: str = Form(...)) -> Response:
+    """
+    Authenticate a browser session for the WebUI.
+
+    Args:
+        api_key: Submitted admin password.
+
+    Returns:
+        Redirect to `/admin` with a session cookie, or 401 on invalid credentials.
+    """
+    if api_key != _get_proxy_api_key():
+        return HTMLResponse(
+            content=_render_page("Web UI Login", "<h2 class=\"text-xl font-bold\">Invalid admin password.</h2>"),
+            status_code=status.HTTP_401_UNAUTHORIZED,
+        )
+
+    response = RedirectResponse(url="/admin", status_code=status.HTTP_303_SEE_OTHER)
+    _set_session_cookie(response, _get_proxy_api_key())
+    return response
+
+
+@setup_router.get("/setup", response_class=HTMLResponse)
+async def setup_page(request: Request) -> Response:
+    """
+    Render the Setup Wizard page.
+
+    Args:
+        request: Incoming HTTP request.
+
+    Returns:
+        Setup page or redirect to `/admin` when setup is already complete.
     """
     if not getattr(request.app.state, "setup_required", False):
         return RedirectResponse(url="/admin")
 
-    content = """
+    if _is_platform_managed_mode() and not _has_secure_proxy_api_key():
+        content = """
 <h2 class="text-2xl font-bold mb-2 text-gray-800">Kiro Gateway Setup</h2>
-<p class="text-sm text-gray-600 mb-6">Configure your gateway to get started.</p>
+<p class="text-sm text-gray-600 mb-4">The proxy API key must be configured outside the gateway.</p>
+<p class="text-sm text-gray-600">Set <code>PROXY_API_KEY</code> in your Docker platform or environment manager, then restart the container and return here to add accounts.</p>
+"""
+        return HTMLResponse(content=_render_page("Setup Wizard", content))
 
-<form action="/setup" method="post" class="space-y-4">
+    password_section = """
     <div>
         <label class="block text-sm font-medium text-gray-700">Admin Password (PROXY_API_KEY)</label>
         <input type="password" name="api_key" required minlength="8"
@@ -157,6 +403,21 @@ async def setup_page(request: Request):
                placeholder="Choose a strong password">
         <p class="text-xs text-gray-500 mt-1">Minimum 8 characters. You'll use this to access the dashboard.</p>
     </div>
+    """
+    if _is_platform_managed_mode():
+        password_section = """
+    <div class="rounded-md bg-blue-50 border border-blue-200 p-3 text-sm text-blue-900">
+        <p><strong>Platform-managed mode:</strong> the existing platform secret will be used for Web UI login.</p>
+    </div>
+    <input type="hidden" name="api_key" value="platform-managed">
+    """
+
+    content = f"""
+<h2 class="text-2xl font-bold mb-2 text-gray-800">Kiro Gateway Setup</h2>
+<p class="text-sm text-gray-600 mb-6">Configure your gateway to get started.</p>
+
+<form action="/setup" method="post" class="space-y-4">
+    {password_section}
 
     <div>
         <label class="block text-sm font-medium text-gray-700">Authentication Method</label>
@@ -182,38 +443,38 @@ async def setup_page(request: Request):
     </div>
 
     <button type="submit"
-            class="w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500">
+            class="w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700">
         Save and Start Gateway
     </button>
 </form>
 
 <script>
-function toggleAuthField() {
+function toggleAuthField() {{
     const type = document.getElementById('auth_type').value;
     const rtField = document.getElementById('refresh_token_field');
     const sqlField = document.getElementById('sqlite_field');
     const rtInput = rtField.querySelector('input');
     const sqlInput = sqlField.querySelector('input');
 
-    if (type === 'sqlite') {
+    if (type === 'sqlite') {{
         rtField.style.display = 'none';
         sqlField.style.display = 'block';
         rtInput.disabled = true;
         sqlInput.disabled = false;
         sqlInput.name = 'auth_value';
         rtInput.name = 'auth_value_rt';
-    } else {
+    }} else {{
         rtField.style.display = 'block';
         sqlField.style.display = 'none';
         rtInput.disabled = false;
         sqlInput.disabled = true;
         rtInput.name = 'auth_value';
         sqlInput.name = 'auth_value_sqlite';
-    }
-}
+    }}
+}}
 </script>
 """
-    return get_html_template("Setup Wizard", content)
+    return HTMLResponse(content=_render_page("Setup Wizard", content))
 
 
 @setup_router.post("/setup")
@@ -224,114 +485,83 @@ async def process_setup(
     auth_value: str = Form(None),
     auth_value_rt: str = Form(None),
     auth_value_sqlite: str = Form(None),
-):
+) -> Response:
     """
-    Process the setup form: write .env, write credentials.json, hot-reload.
-
-    Only one of `auth_value` / `auth_value_rt` / `auth_value_sqlite` is
-    populated thanks to client-side JavaScript toggling field names.
+    Process the setup form.
 
     Args:
         request: Incoming HTTP request.
-        api_key: Chosen admin password.
-        auth_type: Either "refresh_token" or "sqlite".
-        auth_value: Active value (renamed by JS).
-        auth_value_rt: Refresh token value (disabled field, kept for fallback).
-        auth_value_sqlite: SQLite path value (disabled field, kept for fallback).
+        api_key: Submitted admin password.
+        auth_type: Selected account type.
+        auth_value: Active value field.
+        auth_value_rt: Refresh token fallback field.
+        auth_value_sqlite: SQLite fallback field.
 
     Returns:
-        RedirectResponse to /admin on success, or HTMLResponse with error.
+        Redirect to `/admin` on success or HTML error response on invalid input.
     """
-    actual_value = auth_value or auth_value_rt or auth_value_sqlite
-    if not actual_value:
+    credentials_entry = _credentials_from_form(auth_type, auth_value, auth_value_rt, auth_value_sqlite)
+    if credentials_entry is None:
+        return HTMLResponse(content="<h1>Error</h1><p>No token or path provided.</p>", status_code=status.HTTP_400_BAD_REQUEST)
+
+    if _is_platform_managed_mode() and not _has_secure_proxy_api_key():
         return HTMLResponse(
-            content="<h1>Error</h1><p>No token or path provided.</p>",
+            content="<h1>Error</h1><p>PROXY_API_KEY must be configured outside the gateway in platform-managed mode.</p>",
             status_code=status.HTTP_400_BAD_REQUEST,
         )
 
-    # 1. Update .env file
-    env_path = Path(".env")
-    env_content = env_path.read_text() if env_path.exists() else ""
-
-    if re.search(r"^PROXY_API_KEY=.*$", env_content, re.MULTILINE):
-        env_content = re.sub(
-            r"^PROXY_API_KEY=.*$",
-            f'PROXY_API_KEY="{api_key}"',
-            env_content,
-            flags=re.MULTILINE,
-        )
-    else:
-        env_content += f'\nPROXY_API_KEY="{api_key}"\n'
-
-    if "ACCOUNT_SYSTEM" not in env_content:
-        env_content += "ACCOUNT_SYSTEM=true\n"
-    else:
-        env_content = re.sub(
-            r"^ACCOUNT_SYSTEM=.*$",
-            "ACCOUNT_SYSTEM=true",
-            env_content,
-            flags=re.MULTILINE,
-        )
-
-    env_path.write_text(env_content)
-
-    os.environ["PROXY_API_KEY"] = api_key
-    os.environ["ACCOUNT_SYSTEM"] = "true"
-
-    # 2. Update credentials.json
-    creds = []
-    if auth_type == "refresh_token":
-        creds.append({"type": "refresh_token", "refresh_token": actual_value})
-    elif auth_type == "sqlite":
-        creds.append({"type": "sqlite", "path": actual_value})
+    effective_api_key = _get_proxy_api_key()
+    if not _is_platform_managed_mode():
+        _write_env_settings(WEBUI_ENV_FILE, api_key)
+        os.environ["PROXY_API_KEY"] = api_key
+        os.environ["ACCOUNT_SYSTEM"] = "true"
+        effective_api_key = api_key
 
     creds_path = Path(ACCOUNTS_CONFIG_FILE)
-    creds_path.write_text(json.dumps(creds, indent=2))
-    logger.info(f"Setup: wrote {len(creds)} account(s) to {creds_path}")
+    creds_path.write_text(json.dumps([credentials_entry], indent=2), encoding="utf-8")
+    logger.info(f"Setup: wrote 1 account to {creds_path}")
 
-    # 3. Hot reload
-    request.app.state.setup_required = False
     if hasattr(request.app.state, "account_manager") and request.app.state.account_manager is not None:
-        try:
-            await request.app.state.account_manager.reload_credentials()
-        except Exception as e:
-            logger.error(f"Hot reload failed: {e}")
+        await request.app.state.account_manager.reload_credentials()
 
-    return RedirectResponse(url="/admin", status_code=status.HTTP_303_SEE_OTHER)
+    request.app.state.setup_required = False
+    response = RedirectResponse(url="/admin", status_code=status.HTTP_303_SEE_OTHER)
+    _set_session_cookie(response, effective_api_key)
+    return response
 
 
 @setup_router.get("/admin", response_class=HTMLResponse)
-async def admin_page(request: Request):
+async def admin_page(request: Request) -> Response:
     """
     Render the Account Manager Dashboard.
-
-    Redirects to /setup if setup is not yet complete.
 
     Args:
         request: Incoming HTTP request.
 
     Returns:
-        HTMLResponse with the admin dashboard, or RedirectResponse to /setup.
+        Authenticated dashboard or redirect to `/setup` or `/login`.
     """
     if getattr(request.app.state, "setup_required", False):
         return RedirectResponse(url="/setup")
 
+    if not _is_webui_authenticated(request):
+        return _login_redirect()
+
     creds_path = Path(ACCOUNTS_CONFIG_FILE)
-    accounts = json.loads(creds_path.read_text()) if creds_path.exists() else []
+    accounts = json.loads(creds_path.read_text(encoding="utf-8")) if creds_path.exists() else []
 
     accounts_html = ""
-    for i, acc in enumerate(accounts):
-        acc_type = acc.get("type", "Unknown")
-        acc_value = acc.get("refresh_token", acc.get("path", ""))
-        display_value = acc_value[:20] + "..." if len(acc_value) > 20 else acc_value
-
+    for index, account in enumerate(accounts):
+        account_type = account.get("type", "Unknown")
+        account_value = account.get("refresh_token", account.get("path", ""))
+        display_value = account_value[:20] + "..." if len(account_value) > 20 else account_value
         accounts_html += f"""
 <div class="border border-gray-200 p-4 rounded-md mb-2 flex justify-between items-center">
     <div class="flex-1 min-w-0">
-        <span class="font-semibold text-gray-800">{acc_type}</span>
+        <span class="font-semibold text-gray-800">{account_type}</span>
         <span class="text-sm text-gray-500 block font-mono truncate">{display_value}</span>
     </div>
-    <form action="/admin/api/accounts/delete/{i}" method="post" class="ml-2">
+    <form action="/admin/api/accounts/delete/{index}" method="post" class="ml-2">
         <button type="submit"
                 onclick="return confirm('Delete this account?')"
                 class="text-red-600 hover:text-red-800 text-sm font-medium">
@@ -380,10 +610,6 @@ async def admin_page(request: Request):
     </form>
 </div>
 
-<div class="border-t pt-6 mt-6 text-center">
-    <p class="text-xs text-gray-400">Gateway is running. API endpoints at <code>/v1/</code> are live.</p>
-</div>
-
 <script>
 function toggleAdminField() {{
     const type = document.getElementById('admin_auth_type').value;
@@ -410,7 +636,7 @@ function toggleAdminField() {{
 }}
 </script>
 """
-    return get_html_template("Admin Dashboard", content)
+    return HTMLResponse(content=_render_page("Admin Dashboard", content))
 
 
 @setup_router.post("/admin/api/accounts")
@@ -420,79 +646,67 @@ async def add_account(
     auth_value: str = Form(None),
     auth_value_rt: str = Form(None),
     auth_value_sqlite: str = Form(None),
-):
+) -> Response:
     """
-    Append a new account to credentials.json and trigger hot-reload.
+    Append a new account to `credentials.json`.
 
     Args:
         request: Incoming HTTP request.
-        auth_type: Either "refresh_token" or "sqlite".
-        auth_value: Active value (renamed by JS).
-        auth_value_rt: Refresh token value (disabled field).
-        auth_value_sqlite: SQLite path value (disabled field).
+        auth_type: Selected account type.
+        auth_value: Active value field.
+        auth_value_rt: Refresh token fallback field.
+        auth_value_sqlite: SQLite fallback field.
 
     Returns:
-        RedirectResponse to /admin on success, or HTMLResponse with error.
+        Redirect to `/admin` or `/login`.
     """
-    actual_value = auth_value or auth_value_rt or auth_value_sqlite
-    if not actual_value:
-        return HTMLResponse(
-            content="<h1>Error</h1><p>No value provided.</p>",
-            status_code=status.HTTP_400_BAD_REQUEST,
-        )
+    if not _is_webui_authenticated(request):
+        return _login_redirect()
+
+    credentials_entry = _credentials_from_form(auth_type, auth_value, auth_value_rt, auth_value_sqlite)
+    if credentials_entry is None:
+        return HTMLResponse(content="<h1>Error</h1><p>No value provided.</p>", status_code=status.HTTP_400_BAD_REQUEST)
 
     creds_path = Path(ACCOUNTS_CONFIG_FILE)
-    accounts = json.loads(creds_path.read_text()) if creds_path.exists() else []
-
-    if auth_type == "refresh_token":
-        accounts.append({"type": "refresh_token", "refresh_token": actual_value})
-    elif auth_type == "sqlite":
-        accounts.append({"type": "sqlite", "path": actual_value})
-
-    creds_path.write_text(json.dumps(accounts, indent=2))
+    accounts = json.loads(creds_path.read_text(encoding="utf-8")) if creds_path.exists() else []
+    accounts.append(credentials_entry)
+    creds_path.write_text(json.dumps(accounts, indent=2), encoding="utf-8")
     logger.info(f"Added account #{len(accounts)} ({auth_type})")
 
     if hasattr(request.app.state, "account_manager") and request.app.state.account_manager is not None:
-        try:
-            await request.app.state.account_manager.reload_credentials()
-        except Exception as e:
-            logger.error(f"Hot reload after add failed: {e}")
+        await request.app.state.account_manager.reload_credentials()
 
     return RedirectResponse(url="/admin", status_code=status.HTTP_303_SEE_OTHER)
 
 
 @setup_router.post("/admin/api/accounts/delete/{index}")
-async def delete_account(request: Request, index: int):
+async def delete_account(request: Request, index: int) -> Response:
     """
-    Remove an account from credentials.json and trigger hot-reload.
-
-    If the last account is removed, the gateway re-enters setup mode.
+    Remove an account from `credentials.json`.
 
     Args:
         request: Incoming HTTP request.
-        index: Zero-based index of the account to delete.
+        index: Zero-based account index.
 
     Returns:
-        RedirectResponse to /admin.
+        Redirect to `/admin` or `/login`.
     """
+    if not _is_webui_authenticated(request):
+        return _login_redirect()
+
     creds_path = Path(ACCOUNTS_CONFIG_FILE)
     if not creds_path.exists():
         return RedirectResponse(url="/admin", status_code=status.HTTP_303_SEE_OTHER)
 
-    accounts = json.loads(creds_path.read_text())
+    accounts = json.loads(creds_path.read_text(encoding="utf-8"))
     if 0 <= index < len(accounts):
         removed = accounts.pop(index)
-        creds_path.write_text(json.dumps(accounts, indent=2))
+        creds_path.write_text(json.dumps(accounts, indent=2), encoding="utf-8")
         logger.info(f"Deleted account #{index} ({removed.get('type')})")
-
         if not accounts:
             request.app.state.setup_required = True
-            logger.warning("All accounts deleted. Entering setup mode.")
 
     if hasattr(request.app.state, "account_manager") and request.app.state.account_manager is not None:
-        try:
-            await request.app.state.account_manager.reload_credentials()
-        except Exception as e:
-            logger.error(f"Hot reload after delete failed: {e}")
+        await request.app.state.account_manager.reload_credentials()
 
     return RedirectResponse(url="/admin", status_code=status.HTTP_303_SEE_OTHER)

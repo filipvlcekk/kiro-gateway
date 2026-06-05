@@ -27,8 +27,9 @@ COPY --chown=kiro:kiro . .
 # (in case they were copied from build context or cache)
 RUN rm -f credentials.json state.json
 
-# Create directory for debug logs with proper permissions
-RUN mkdir -p debug_logs && chown -R kiro:kiro debug_logs
+# Create runtime directories with proper permissions for the non-root user.
+# /app/data is the recommended mount point for persistent account state.
+RUN mkdir -p debug_logs /app/data && chown -R kiro:kiro debug_logs /app/data
 
 # Switch to non-root user
 USER kiro
