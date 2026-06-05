@@ -4,6 +4,7 @@ uvicorn[standard]
 httpx
 loguru
 python-dotenv
+python-multipart
 tiktoken
 
 # Testing dependencies
