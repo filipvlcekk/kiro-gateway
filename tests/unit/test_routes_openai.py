@@ -380,6 +380,44 @@ class TestModelsEndpoint:
         for model in response.json()["data"]:
             assert model["owned_by"] == "anthropic"
 
+    def test_models_auth_uses_reloaded_proxy_key(self, monkeypatch, reload_test_application):
+        """
+        What it does: Verifies OpenAI auth reads the updated proxy API key after app reload.
+        Purpose: Prevent stale PROXY_API_KEY imports from leaking across test app instances.
+        """
+        try:
+            print("Setup: Reloading app with first proxy key...")
+            monkeypatch.setenv("PROXY_API_KEY", "first-proxy-key-12345")
+            first_app = reload_test_application("first-proxy-key-12345")
+
+            with TestClient(first_app) as first_client:
+                first_response = first_client.get(
+                    "/v1/models",
+                    headers={"Authorization": "Bearer first-proxy-key-12345"},
+                )
+                assert first_response.status_code == 200
+
+            print("Setup: Reloading app with second proxy key...")
+            monkeypatch.setenv("PROXY_API_KEY", "second-proxy-key-67890")
+            second_app = reload_test_application("second-proxy-key-67890")
+
+            with TestClient(second_app) as second_client:
+                stale_key_response = second_client.get(
+                    "/v1/models",
+                    headers={"Authorization": "Bearer first-proxy-key-12345"},
+                )
+                fresh_key_response = second_client.get(
+                    "/v1/models",
+                    headers={"Authorization": "Bearer second-proxy-key-67890"},
+                )
+
+            print(f"Checking stale key status: {stale_key_response.status_code}")
+            print(f"Checking fresh key status: {fresh_key_response.status_code}")
+            assert stale_key_response.status_code == 401
+            assert fresh_key_response.status_code == 200
+        finally:
+            reload_test_application()
+
 
 # =============================================================================
 # Tests for chat completions endpoint (/v1/chat/completions)

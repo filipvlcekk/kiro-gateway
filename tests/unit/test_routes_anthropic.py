@@ -2519,3 +2519,49 @@ class TestCountTokensEndpoint:
         assert data["input_tokens"] > 0
         
         print("✅ max_tokens is NOT required for count_tokens")
+
+    def test_count_tokens_auth_uses_reloaded_proxy_key(self, monkeypatch, reload_test_application):
+        """
+        What it does: Verifies Anthropic auth reads the updated proxy API key after app reload.
+        Purpose: Prevent stale PROXY_API_KEY imports from leaking across test app instances.
+        """
+        request_data = {
+            "model": "claude-sonnet-4-5",
+            "messages": [{"role": "user", "content": "Hello"}],
+        }
+
+        try:
+            print("Setup: Reloading app with first proxy key...")
+            monkeypatch.setenv("PROXY_API_KEY", "first-proxy-key-12345")
+            first_app = reload_test_application("first-proxy-key-12345")
+
+            with TestClient(first_app) as first_client:
+                first_response = first_client.post(
+                    "/v1/messages/count_tokens",
+                    headers={"x-api-key": "first-proxy-key-12345"},
+                    json=request_data,
+                )
+                assert first_response.status_code == 200
+
+            print("Setup: Reloading app with second proxy key...")
+            monkeypatch.setenv("PROXY_API_KEY", "second-proxy-key-67890")
+            second_app = reload_test_application("second-proxy-key-67890")
+
+            with TestClient(second_app) as second_client:
+                stale_key_response = second_client.post(
+                    "/v1/messages/count_tokens",
+                    headers={"x-api-key": "first-proxy-key-12345"},
+                    json=request_data,
+                )
+                fresh_key_response = second_client.post(
+                    "/v1/messages/count_tokens",
+                    headers={"x-api-key": "second-proxy-key-67890"},
+                    json=request_data,
+                )
+
+            print(f"Checking stale key status: {stale_key_response.status_code}")
+            print(f"Checking fresh key status: {fresh_key_response.status_code}")
+            assert stale_key_response.status_code == 401
+            assert fresh_key_response.status_code == 200
+        finally:
+            reload_test_application()

@@ -18,10 +18,11 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 from datetime import datetime, timezone
 
 import httpx
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 # Ensure a safe proxy key is present before any module imports kiro.config/main.
-os.environ.setdefault("PROXY_API_KEY", "test_proxy_key_12345")
+os.environ["PROXY_API_KEY"] = "test_proxy_key_12345"
 
 
 # =============================================================================
@@ -539,16 +540,39 @@ def block_all_network_calls():
 # =============================================================================
 
 @pytest.fixture
-def clean_app():
+def reload_test_application():
+    """
+    Reload auth-sensitive modules and return a fresh application instance.
+
+    Returns:
+        Callable that optionally updates PROXY_API_KEY and returns a new FastAPI app.
+    """
+    def _reload(proxy_api_key: str = "test_proxy_key_12345") -> FastAPI:
+        os.environ["PROXY_API_KEY"] = proxy_api_key
+
+        import kiro.config as config_module
+        import kiro.routes_anthropic as anthropic_routes_module
+        import kiro.routes_openai as openai_routes_module
+        import kiro.routes_setup as setup_routes_module
+        import main as main_module
+
+        importlib.reload(config_module)
+        importlib.reload(openai_routes_module)
+        importlib.reload(anthropic_routes_module)
+        importlib.reload(setup_routes_module)
+        main_module = importlib.reload(main_module)
+        return main_module.app
+
+    return _reload
+
+
+@pytest.fixture
+def clean_app(reload_test_application):
     """
     Returns a "clean" application instance for each test.
     """
     print("Importing application for test...")
-    os.environ["PROXY_API_KEY"] = "test_proxy_key_12345"
-    import main as main_module
-
-    main_module = importlib.reload(main_module)
-    app = main_module.app
+    app = reload_test_application()
     # Reset all dependency overrides before test
     app.dependency_overrides = {}
     return app
