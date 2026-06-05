@@ -7,10 +7,6 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-
-# Avoid loading an actual local secret during tests.
-os.environ["PROXY_API_KEY"] = ""
-
 from kiro.routes_setup import setup_router  # noqa: E402
 
 

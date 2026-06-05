@@ -1,0 +1,8 @@
+-r requirements.in
+
+# Testing and CI dependencies
+pytest
+pytest-asyncio
+hypothesis
+pytest-cov
+pip-audit

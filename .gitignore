@@ -15,9 +15,11 @@ __pycache__/
 *$py.class
 *.so
 .Python
+.venv/
 *.egg-info/
 dist/
 build/
+.pip-tools-cache/
 
 # Debug logs (generated when DEBUG_MODE is enabled)
 debug_logs*/

@@ -1,0 +1,8 @@
+# Production dependencies
+fastapi
+uvicorn[standard]
+httpx
+loguru
+python-dotenv
+python-multipart
+tiktoken

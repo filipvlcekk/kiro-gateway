@@ -1,7 +1,7 @@
 # Kiro Gateway - Docker Image
 # Optimized single-stage build
 
-FROM python:3.10-slim
+FROM python:3.11-slim
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \
@@ -18,7 +18,7 @@ RUN chown kiro:kiro /app
 
 # Install dependencies first (better layer caching)
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN python -m pip install --no-cache-dir --require-hashes -r requirements.txt
 
 # Copy application code
 COPY --chown=kiro:kiro . .

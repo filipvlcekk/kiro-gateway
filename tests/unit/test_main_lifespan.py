@@ -694,6 +694,90 @@ class TestLifespanAccountManagerInit:
                     assert app.state.setup_required is True
 
                 print("✓ Application entered setup mode when all accounts failed")
+
+    @pytest.mark.asyncio
+    async def test_lifespan_revalidates_setup_state_when_configuration_is_now_valid(self, tmp_path, monkeypatch):
+        """
+        Test 103a: Lifespan recalculates setup_required at startup
+
+        What it does: Verifies stale setup mode is cleared when startup validation passes
+        Purpose: Prevent import-time setup state from blocking API routes after configuration is fixed
+        """
+        print("\n=== Test 103a: Revalidate setup state when configuration is now valid ===")
+
+        monkeypatch.setattr("main.ACCOUNT_SYSTEM", True)
+        monkeypatch.setattr("main.REFRESH_TOKEN", "test_token")
+        monkeypatch.setattr("main.KIRO_CREDS_FILE", None)
+        monkeypatch.setattr("main.KIRO_CLI_DB_FILE", None)
+        monkeypatch.setattr("main.validate_configuration", Mock(return_value=False))
+
+        creds_file = tmp_path / "credentials.json"
+        state_file = tmp_path / "state.json"
+
+        monkeypatch.setattr("main.ACCOUNTS_CONFIG_FILE", str(creds_file))
+        monkeypatch.setattr("main.ACCOUNTS_STATE_FILE", str(state_file))
+
+        mock_manager = AsyncMock()
+        mock_manager._accounts = {"account1": MagicMock()}
+        mock_manager._current_account_index = 0
+        mock_manager._initialize_account = AsyncMock(return_value=True)
+        mock_manager._save_state = AsyncMock()
+        mock_manager.save_state_periodically = AsyncMock()
+
+        with patch("main.AccountManager", return_value=mock_manager):
+            with patch("main.httpx.AsyncClient") as mock_client_class:
+                mock_client = AsyncMock()
+                mock_client_class.return_value = mock_client
+
+                from main import lifespan, app
+
+                app.state.setup_required = True
+                async with lifespan(app):
+                    assert app.state.setup_required is False
+
+                print("✓ Lifespan cleared stale setup mode after successful validation")
+
+    @pytest.mark.asyncio
+    async def test_lifespan_keeps_setup_mode_when_configuration_is_invalid(self, tmp_path, monkeypatch):
+        """
+        Test 103b: Lifespan preserves setup mode for invalid startup configuration
+
+        What it does: Verifies invalid configuration keeps setup mode even if account init succeeds
+        Purpose: Protect WebUI setup flow for insecure or missing proxy API key configuration
+        """
+        print("\n=== Test 103b: Preserve setup mode when configuration is invalid ===")
+
+        monkeypatch.setattr("main.ACCOUNT_SYSTEM", True)
+        monkeypatch.setattr("main.REFRESH_TOKEN", "test_token")
+        monkeypatch.setattr("main.KIRO_CREDS_FILE", None)
+        monkeypatch.setattr("main.KIRO_CLI_DB_FILE", None)
+        monkeypatch.setattr("main.validate_configuration", Mock(return_value=True))
+
+        creds_file = tmp_path / "credentials.json"
+        state_file = tmp_path / "state.json"
+
+        monkeypatch.setattr("main.ACCOUNTS_CONFIG_FILE", str(creds_file))
+        monkeypatch.setattr("main.ACCOUNTS_STATE_FILE", str(state_file))
+
+        mock_manager = AsyncMock()
+        mock_manager._accounts = {"account1": MagicMock()}
+        mock_manager._current_account_index = 0
+        mock_manager._initialize_account = AsyncMock(return_value=True)
+        mock_manager._save_state = AsyncMock()
+        mock_manager.save_state_periodically = AsyncMock()
+
+        with patch("main.AccountManager", return_value=mock_manager):
+            with patch("main.httpx.AsyncClient") as mock_client_class:
+                mock_client = AsyncMock()
+                mock_client_class.return_value = mock_client
+
+                from main import lifespan, app
+
+                app.state.setup_required = False
+                async with lifespan(app):
+                    assert app.state.setup_required is True
+
+                print("✓ Lifespan preserved setup mode for invalid configuration")
     
     @pytest.mark.asyncio
     async def test_lifespan_save_initial_state(self, tmp_path, monkeypatch):

@@ -9,7 +9,7 @@
 Made with ❤️ by [@Jwadow](https://github.com/jwadow)
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-green.svg)](https://fastapi.tiangolo.com/)
 [![Sponsor](https://img.shields.io/badge/💖_Sponsor-Support_Development-ff69b4)](#-support-the-project)
 
@@ -75,7 +75,7 @@ Made with ❤️ by [@Jwadow](https://github.com/jwadow)
 
 ### Prerequisites
 
-- Python 3.10+
+- Python 3.11+
 - One of the following:
   - [Kiro IDE](https://kiro.dev/) with logged in account, OR
   - [Kiro CLI](https://kiro.dev/cli/) with AWS SSO (AWS IAM Identity Center, OIDC) - free Builder ID or corporate account
@@ -89,21 +89,32 @@ cd kiro-gateway
 
 # Or download ZIP: Code → Download ZIP → extract → open kiro-gateway folder
 
-# Install dependencies
-pip install -r requirements.txt
+# Create local virtual environment
+python3 -m venv .venv
+
+# Install development dependencies from the locked file
+.venv/bin/python -m pip install --require-hashes -r requirements-dev.txt
 
 # Configure (see Configuration section)
 cp .env.example .env
 # Copy and edit .env with your credentials
 
 # Start the server
-python main.py
+.venv/bin/python main.py
 
 # Or with custom port (if 8000 is busy)
-python main.py --port 9000
+.venv/bin/python main.py --port 9000
 ```
 
 The server will be available at `http://localhost:8000`
+
+To regenerate the lockfiles after changing direct dependencies:
+
+```bash
+.venv/bin/python -m pip install pip-tools
+.venv/bin/pip-compile --allow-unsafe --generate-hashes --strip-extras --output-file=requirements.txt requirements.in
+.venv/bin/pip-compile --allow-unsafe --generate-hashes --strip-extras --output-file=requirements-dev.txt requirements-dev.in
+```
 
 ---
 

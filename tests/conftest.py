@@ -8,7 +8,9 @@ All tests MUST be completely isolated from the network.
 """
 
 import asyncio
+import importlib
 import json
+import os
 import pytest
 import time
 from typing import AsyncGenerator, Dict, Any, List
@@ -17,6 +19,9 @@ from datetime import datetime, timezone
 
 import httpx
 from fastapi.testclient import TestClient
+
+# Ensure a safe proxy key is present before any module imports kiro.config/main.
+os.environ.setdefault("PROXY_API_KEY", "test_proxy_key_12345")
 
 
 # =============================================================================
@@ -86,9 +91,13 @@ def setup_test_environment(tmp_path_factory):
     import kiro.config
     original_creds_file = kiro.config.ACCOUNTS_CONFIG_FILE
     original_state_file = kiro.config.ACCOUNTS_STATE_FILE
-    
+    original_env_creds_file = os.environ.get("ACCOUNTS_CONFIG_FILE")
+    original_env_state_file = os.environ.get("ACCOUNTS_STATE_FILE")
+
     kiro.config.ACCOUNTS_CONFIG_FILE = str(creds_file)
     kiro.config.ACCOUNTS_STATE_FILE = str(tmp_dir / "state.json")
+    os.environ["ACCOUNTS_CONFIG_FILE"] = str(creds_file)
+    os.environ["ACCOUNTS_STATE_FILE"] = str(tmp_dir / "state.json")
     
     print(f"✅ Test credentials: {creds_file}")
     print(f"✅ Test state: {tmp_dir / 'state.json'}")
@@ -98,6 +107,14 @@ def setup_test_environment(tmp_path_factory):
     # Restore original paths
     kiro.config.ACCOUNTS_CONFIG_FILE = original_creds_file
     kiro.config.ACCOUNTS_STATE_FILE = original_state_file
+    if original_env_creds_file is None:
+        os.environ.pop("ACCOUNTS_CONFIG_FILE", None)
+    else:
+        os.environ["ACCOUNTS_CONFIG_FILE"] = original_env_creds_file
+    if original_env_state_file is None:
+        os.environ.pop("ACCOUNTS_STATE_FILE", None)
+    else:
+        os.environ["ACCOUNTS_STATE_FILE"] = original_env_state_file
     
     print("🧹 Test environment cleaned up")
 
@@ -527,7 +544,11 @@ def clean_app():
     Returns a "clean" application instance for each test.
     """
     print("Importing application for test...")
-    from main import app
+    os.environ["PROXY_API_KEY"] = "test_proxy_key_12345"
+    import main as main_module
+
+    main_module = importlib.reload(main_module)
+    app = main_module.app
     # Reset all dependency overrides before test
     app.dependency_overrides = {}
     return app

@@ -360,9 +360,6 @@ def validate_configuration() -> bool:
         return True
     return False
 
-_SETUP_REQUIRED = validate_configuration()
-
-
 # --- Lifespan Manager ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -379,6 +376,7 @@ async def lifespan(app: FastAPI):
     concurrent requests efficiently (fixes issue #24).
     """
     logger.info("Starting application... Creating state managers.")
+    app.state.setup_required = validate_configuration()
     
     # Create shared HTTP client with connection pooling
     # This reduces memory usage and enables connection reuse across requests
@@ -596,7 +594,7 @@ app = FastAPI(
     version=APP_VERSION,
     lifespan=lifespan
 )
-app.state.setup_required = _SETUP_REQUIRED
+app.state.setup_required = False
 
 from kiro.routes_setup import api_setup_guard_middleware
 app.middleware("http")(api_setup_guard_middleware)

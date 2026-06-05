@@ -1047,3 +1047,39 @@ class TestContainerDeploymentFiles:
 
         print("Verification: Checking for /app/data directory creation...")
         assert "mkdir -p debug_logs /app/data" in dockerfile_content
+
+    def test_dockerfile_installs_from_hashed_lockfile(self):
+        """
+        What it does: Verifies Dockerfile installs dependencies from the hashed lockfile.
+        Purpose: Ensure container builds use reproducible and tamper-resistant dependency installs.
+        """
+        print("Setup: Reading Dockerfile...")
+
+        dockerfile_content = Path("Dockerfile").read_text(encoding="utf-8")
+
+        print("Verification: Checking for --require-hashes with requirements.txt...")
+        assert "pip install --no-cache-dir --require-hashes -r requirements.txt" in dockerfile_content
+
+    def test_ci_workflow_installs_from_hashed_dev_lockfile(self):
+        """
+        What it does: Verifies CI installs dependencies from the hashed development lockfile.
+        Purpose: Ensure test tooling in GitHub Actions uses exact pinned versions.
+        """
+        print("Setup: Reading GitHub Actions workflow...")
+
+        workflow_content = Path(".github/workflows/docker.yml").read_text(encoding="utf-8")
+
+        print("Verification: Checking CI install command...")
+        assert "pip install --require-hashes -r requirements-dev.txt" in workflow_content
+
+    def test_ci_workflow_runs_pip_audit(self):
+        """
+        What it does: Verifies CI runs pip-audit against the locked dependencies.
+        Purpose: Ensure dependency vulnerability scanning is part of the default pipeline.
+        """
+        print("Setup: Reading GitHub Actions workflow...")
+
+        workflow_content = Path(".github/workflows/docker.yml").read_text(encoding="utf-8")
+
+        print("Verification: Checking for pip-audit execution...")
+        assert "pip-audit" in workflow_content or "pip_audit" in workflow_content

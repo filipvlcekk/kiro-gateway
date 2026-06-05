@@ -31,7 +31,7 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Callable, Optional
+from collections.abc import Callable
 
 from fastapi import APIRouter, Form, Request, Response, status
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -130,7 +130,7 @@ def _build_session_token(api_key: str) -> str:
     return f"{payload}.{signature}"
 
 
-def _is_valid_session_token(token: Optional[str]) -> bool:
+def _is_valid_session_token(token: str | None) -> bool:
     """
     Validate a signed session token.
 
@@ -276,7 +276,12 @@ def _login_redirect() -> RedirectResponse:
     return RedirectResponse(url="/login", status_code=status.HTTP_303_SEE_OTHER)
 
 
-def _credentials_from_form(auth_type: str, auth_value: Optional[str], auth_value_rt: Optional[str], auth_value_sqlite: Optional[str]) -> Optional[dict]:
+def _credentials_from_form(
+    auth_type: str,
+    auth_value: str | None,
+    auth_value_rt: str | None,
+    auth_value_sqlite: str | None,
+) -> dict | None:
     """
     Convert setup/admin form input into a credentials.json entry.
 

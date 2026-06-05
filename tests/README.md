@@ -20,11 +20,11 @@ Any attempt to make an unauthorized network call will result in immediate test f
 ### Installing Dependencies
 
 ```bash
-# Main project dependencies
-pip install -r requirements.txt
+# Create local virtual environment
+python3 -m venv .venv
 
-# Additional testing dependencies
-pip install pytest pytest-asyncio hypothesis
+# Install locked development dependencies
+.venv/bin/python -m pip install --require-hashes -r requirements-dev.txt
 ```
 
 ### Running All Tests
@@ -162,9 +162,6 @@ pytest
 ### Async tests don't work
 
 ```bash
-# Make sure pytest-asyncio is installed
-pip install pytest-asyncio
-
 # Check for @pytest.mark.asyncio decorator
 ```
 
@@ -173,11 +170,8 @@ pip install pytest-asyncio
 To check code coverage:
 
 ```bash
-# Install coverage
-pip install pytest-cov
-
 # Run with coverage report
-pytest --cov=kiro --cov-report=html
+.venv/bin/pytest --cov=kiro --cov-report=html
 
 # View report
 open htmlcov/index.html  # macOS/Linux
