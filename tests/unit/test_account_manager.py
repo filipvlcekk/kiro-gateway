@@ -822,6 +822,269 @@ class TestAccountManagerInitializeAccount:
         assert manager._accounts[account_id].model_cache is not None
 
 
+class TestAccountManagerReloadCredentials:
+    """
+    Tests for AccountManager.reload_credentials() method - Hot Reload for WebUI.
+
+    Covers the dynamic reloading of credentials.json without restarting the server,
+    used by the WebUI Setup Wizard when the user adds or removes accounts.
+    """
+
+    @pytest.mark.asyncio
+    async def test_reload_credentials_picks_up_new_account(
+        self, tmp_path, mock_list_models_response
+    ):
+        """
+        Test that a newly added account in credentials.json is loaded by reload_credentials().
+
+        What it does: Creates manager with 1 account, adds 2nd account to file, calls reload,
+                      verifies both accounts are present in manager._accounts
+        Purpose: Verify hot-reload picks up newly added accounts
+        """
+        print("\n=== Test: reload_credentials picks up new account ===")
+
+        # Arrange - create initial credential file
+        test_json1 = tmp_path / "account1.json"
+        test_json1.write_text(json.dumps({
+            "refreshToken": "token1",
+            "accessToken": "access1",
+            "expiresAt": "2099-01-01T00:00:00.000Z",
+            "profileArn": "arn:aws:codewhisperer:us-east-1:123456789:profile/test1",
+            "region": "us-east-1"
+        }))
+
+        creds_file = tmp_path / "credentials.json"
+        creds_file.write_text(json.dumps([
+            {"type": "json", "path": str(test_json1), "enabled": True}
+        ]))
+
+        manager = AccountManager(
+            credentials_file=str(creds_file),
+            state_file=str(tmp_path / "state.json")
+        )
+
+        await manager.load_credentials()
+        assert len(manager._accounts) == 1
+        account1_id = str(test_json1.resolve())
+
+        # Act - add a second account to the file
+        test_json2 = tmp_path / "account2.json"
+        test_json2.write_text(json.dumps({
+            "refreshToken": "token2",
+            "accessToken": "access2",
+            "expiresAt": "2099-01-01T00:00:00.000Z",
+            "profileArn": "arn:aws:codewhisperer:us-east-1:123456789:profile/test2",
+            "region": "us-east-1"
+        }))
+
+        creds_file.write_text(json.dumps([
+            {"type": "json", "path": str(test_json1), "enabled": True},
+            {"type": "json", "path": str(test_json2), "enabled": True}
+        ]))
+
+        # Reload with mocked HTTP client (for first account initialization)
+        with patch('kiro.account_manager.KiroHttpClient') as mock_http_class:
+            mock_client = AsyncMock()
+            mock_response = Mock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = mock_list_models_response
+            mock_client.request_with_retry = AsyncMock(return_value=mock_response)
+            mock_client.close = AsyncMock()
+            mock_http_class.return_value = mock_client
+
+            await manager.reload_credentials()
+
+        # Assert
+        print(f"Accounts after reload: {list(manager._accounts.keys())}")
+        assert len(manager._accounts) == 2
+        assert account1_id in manager._accounts
+        assert str(test_json2.resolve()) in manager._accounts
+
+    @pytest.mark.asyncio
+    async def test_reload_credentials_clears_removed_accounts(
+        self, tmp_path, mock_list_models_response
+    ):
+        """
+        Test that an account removed from credentials.json is gone from manager._accounts.
+
+        What it does: Creates manager with 2 accounts, removes one from file, calls reload,
+                      verifies only 1 account remains
+        Purpose: Verify hot-reload removes accounts that were deleted from file
+        """
+        print("\n=== Test: reload_credentials clears removed accounts ===")
+
+        # Arrange - create initial credential file with 2 accounts
+        test_json1 = tmp_path / "account1.json"
+        test_json1.write_text(json.dumps({
+            "refreshToken": "token1",
+            "accessToken": "access1",
+            "expiresAt": "2099-01-01T00:00:00.000Z",
+            "profileArn": "arn:aws:codewhisperer:us-east-1:123456789:profile/test1",
+            "region": "us-east-1"
+        }))
+
+        test_json2 = tmp_path / "account2.json"
+        test_json2.write_text(json.dumps({
+            "refreshToken": "token2",
+            "accessToken": "access2",
+            "expiresAt": "2099-01-01T00:00:00.000Z",
+            "profileArn": "arn:aws:codewhisperer:us-east-1:123456789:profile/test2",
+            "region": "us-east-1"
+        }))
+
+        creds_file = tmp_path / "credentials.json"
+        creds_file.write_text(json.dumps([
+            {"type": "json", "path": str(test_json1), "enabled": True},
+            {"type": "json", "path": str(test_json2), "enabled": True}
+        ]))
+
+        manager = AccountManager(
+            credentials_file=str(creds_file),
+            state_file=str(tmp_path / "state.json")
+        )
+
+        await manager.load_credentials()
+        assert len(manager._accounts) == 2
+        account2_id = str(test_json2.resolve())
+        assert account2_id in manager._accounts
+
+        # Act - remove account2 from the file
+        creds_file.write_text(json.dumps([
+            {"type": "json", "path": str(test_json1), "enabled": True}
+        ]))
+
+        with patch('kiro.account_manager.KiroHttpClient') as mock_http_class:
+            mock_client = AsyncMock()
+            mock_response = Mock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = mock_list_models_response
+            mock_client.request_with_retry = AsyncMock(return_value=mock_response)
+            mock_client.close = AsyncMock()
+            mock_http_class.return_value = mock_client
+
+            await manager.reload_credentials()
+
+        # Assert
+        print(f"Accounts after reload: {list(manager._accounts.keys())}")
+        assert len(manager._accounts) == 1
+        assert account2_id not in manager._accounts
+
+    @pytest.mark.asyncio
+    async def test_reload_credentials_initializes_first_account(
+        self, tmp_path, mock_list_models_response
+    ):
+        """
+        Test that the first account is initialized (auth_manager set) after reload.
+
+        What it does: Reloads credentials, verifies the first account has auth_manager
+                      and model_cache populated (lazy init triggered by reload)
+        Purpose: Verify reload makes the gateway ready to serve requests immediately
+        """
+        print("\n=== Test: reload_credentials initializes first account ===")
+
+        # Arrange
+        test_json = tmp_path / "test.json"
+        test_json.write_text(json.dumps({
+            "refreshToken": "test_token",
+            "accessToken": "test_access",
+            "expiresAt": "2099-01-01T00:00:00.000Z",
+            "profileArn": "arn:aws:codewhisperer:us-east-1:123456789:profile/test",
+            "region": "us-east-1"
+        }))
+
+        creds_file = tmp_path / "credentials.json"
+        creds_file.write_text(json.dumps([
+            {"type": "json", "path": str(test_json), "enabled": True}
+        ]))
+
+        manager = AccountManager(
+            credentials_file=str(creds_file),
+            state_file=str(tmp_path / "state.json")
+        )
+
+        await manager.load_credentials()
+        account_id = str(test_json.resolve())
+
+        # Account is loaded but NOT yet initialized (lazy init)
+        assert manager._accounts[account_id].auth_manager is None
+
+        # Act - reload with mocked HTTP client
+        with patch('kiro.account_manager.KiroHttpClient') as mock_http_class:
+            mock_client = AsyncMock()
+            mock_response = Mock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = mock_list_models_response
+            mock_client.request_with_retry = AsyncMock(return_value=mock_response)
+            mock_client.close = AsyncMock()
+            mock_http_class.return_value = mock_client
+
+            await manager.reload_credentials()
+
+        # Assert - first account should be initialized after reload
+        print(f"auth_manager after reload: {manager._accounts[account_id].auth_manager is not None}")
+        print(f"model_cache after reload: {manager._accounts[account_id].model_cache is not None}")
+        assert manager._accounts[account_id].auth_manager is not None
+        assert manager._accounts[account_id].model_cache is not None
+        assert manager._accounts[account_id].model_resolver is not None
+
+    @pytest.mark.asyncio
+    async def test_reload_credentials_resets_current_account_index(self, tmp_path):
+        """
+        Test that the global sticky index is reset to 0 after reload.
+
+        What it does: Sets current_account_index to non-zero, calls reload,
+                      verifies it is reset to 0
+        Purpose: Verify reload clears stale sticky state pointing to non-existent accounts
+        """
+        print("\n=== Test: reload_credentials resets current_account_index ===")
+
+        # Arrange
+        creds_file = tmp_path / "credentials.json"
+        creds_file.write_text(json.dumps([]))  # Empty credentials
+
+        manager = AccountManager(
+            credentials_file=str(creds_file),
+            state_file=str(tmp_path / "state.json")
+        )
+
+        # Pre-set the index to simulate stale state
+        manager._current_account_index = 5
+
+        # Act
+        await manager.reload_credentials()
+
+        # Assert
+        print(f"current_account_index after reload: {manager._current_account_index}")
+        assert manager._current_account_index == 0
+
+    @pytest.mark.asyncio
+    async def test_reload_credentials_handles_empty_credentials(self, tmp_path):
+        """
+        Test that reload handles credentials file with zero accounts gracefully.
+
+        What it does: Sets up manager with empty credentials array, calls reload,
+                      verifies _accounts is empty and no exception is raised
+        Purpose: Verify reload does not crash on empty config (WebUI setup mode)
+        """
+        print("\n=== Test: reload_credentials handles empty credentials ===")
+
+        # Arrange
+        creds_file = tmp_path / "credentials.json"
+        creds_file.write_text(json.dumps([]))
+
+        manager = AccountManager(
+            credentials_file=str(creds_file),
+            state_file=str(tmp_path / "state.json")
+        )
+
+        # Act - should not raise
+        await manager.reload_credentials()
+
+        # Assert
+        print(f"Accounts after reload: {len(manager._accounts)}")
+        assert len(manager._accounts) == 0
+
+
 class TestAccountManagerGetNextAccount:
     """
     Tests for AccountManager.get_next_account() method.

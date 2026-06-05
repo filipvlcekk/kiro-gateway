@@ -370,6 +370,36 @@ class AccountManager:
         except Exception as e:
             logger.error(f"Failed to load state: {e}")
     
+    async def reload_credentials(self) -> None:
+        """
+        Reload credentials.json and re-initialize accounts dynamically without restart.
+
+        This is used by the WebUI Setup Wizard when the user adds or removes accounts
+        through the browser. It clears the in-memory state, re-reads the JSON file,
+        and re-initializes the first account so the gateway is ready to serve requests.
+
+        The operation is atomic under self._lock so concurrent requests cannot observe
+        a half-cleared state.
+        """
+        async with self._lock:
+            logger.info("Hot-reloading credentials from disk...")
+
+            self._accounts = {}
+            self._model_to_accounts = {}
+            self._current_account_index = 0
+
+            await self.load_credentials()
+
+            if self._accounts:
+                first_account_id = next(iter(self._accounts))
+                try:
+                    await self._initialize_account(first_account_id)
+                    logger.info(f"Reloaded {len(self._accounts)} account(s); first ready: {first_account_id}")
+                except Exception as e:
+                    logger.error(f"Failed to initialize first account after reload: {e}")
+            else:
+                logger.warning("Reload resulted in zero accounts. Setup mode may be needed.")
+    
     async def _save_state(self) -> None:
         """
         Save runtime state to state.json atomically.
