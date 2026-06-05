@@ -206,7 +206,7 @@ if VPN_PROXY_URL:
 
 
 # --- Configuration Validation ---
-def validate_configuration() -> None:
+def validate_configuration() -> bool:
     """
     Validates that required configuration is present.
     
@@ -218,8 +218,8 @@ def validate_configuration() -> None:
     - Either credentials.json exists OR legacy variables are configured
     - Supports both .env file (local) and environment variables (Docker)
     
-    Raises:
-        SystemExit: If critical configuration is missing
+    Returns:
+        bool: True if setup is required, False otherwise.
     """
     # Priority 1: Check if credentials.json exists (Account System)
     # If it exists, legacy .env validation is skipped
@@ -228,7 +228,7 @@ def validate_configuration() -> None:
     
     if creds_json_path.exists():
         logger.debug(f"Found {ACCOUNTS_CONFIG_FILE}, skipping legacy .env validation")
-        return
+        return False
     
     # Priority 2: credentials.json doesn't exist - validate legacy .env variables
     errors = []
@@ -301,19 +301,12 @@ def validate_configuration() -> None:
             )
     
     # Print errors and exit if any
-    if errors:
-        logger.error("")
-        logger.error("=" * 60)
-        logger.error("  CONFIGURATION ERROR")
-        logger.error("=" * 60)
-        for error in errors:
-            for line in error.split('\n'):
-                logger.error(f"  {line}")
-        logger.error("=" * 60)
-        logger.error("")
-        raise RuntimeError("Configuration validation failed")
-    
-    # Note: Credential loading details are logged by KiroAuthManager
+    if errors or PROXY_API_KEY == "my-super-secret-password-123" or not PROXY_API_KEY:
+        logger.warning("Configuration validation failed or default API key used. Enabling Setup Mode.")
+        return True
+    return False
+
+_SETUP_REQUIRED = validate_configuration()
 
 
 # --- Lifespan Manager ---
@@ -470,34 +463,42 @@ async def lifespan(app: FastAPI):
     # ==============================================================================
     all_accounts = list(app.state.account_manager._accounts.keys())
     
-    if not all_accounts:
-        logger.error("No accounts configured in credentials.json")
-        raise RuntimeError("No accounts configured in credentials.json")
-    
-    # Determine start index from state.json
-    start_index = app.state.account_manager._current_account_index
-    
-    # Try to initialize accounts (full circle)
-    initialized = False
-    
-    for i in range(len(all_accounts)):
-        current_index = (start_index + i) % len(all_accounts)
-        account_id = all_accounts[current_index]
+    try:
+        if not all_accounts:
+            logger.error("No accounts configured in credentials.json")
+            raise RuntimeError("No accounts configured in credentials.json")
         
-        logger.info(f"Attempting to initialize account: {account_id}")
+        # Determine start index from state.json
+        start_index = app.state.account_manager._current_account_index
         
-        success = await app.state.account_manager._initialize_account(account_id)
+        # Try to initialize accounts (full circle)
+        initialized = False
         
-        if success:
-            logger.info(f"Successfully initialized account: {account_id}")
-            initialized = True
-            break
+        for i in range(len(all_accounts)):
+            current_index = (start_index + i) % len(all_accounts)
+            account_id = all_accounts[current_index]
+            
+            logger.info(f"Attempting to initialize account: {account_id}")
+            
+            success = await app.state.account_manager._initialize_account(account_id)
+            
+            if success:
+                logger.info(f"Successfully initialized account: {account_id}")
+                initialized = True
+                break
+            else:
+                logger.warning(f"Failed to initialize account: {account_id}")
+        
+        if not initialized:
+            logger.error("Failed to initialize any account. Check your credentials.")
+            raise RuntimeError("Failed to initialize any account")
+            
+    except Exception as e:
+        logger.error(f"AccountManager initialization failed: {e}")
+        if getattr(app.state, "setup_required", False):
+            logger.warning("Continuing in Setup Mode...")
         else:
-            logger.warning(f"Failed to initialize account: {account_id}")
-    
-    if not initialized:
-        logger.error("Failed to initialize any account. Check your credentials.")
-        raise RuntimeError("Failed to initialize any account")
+            raise RuntimeError("Failed to initialize any account")
     
     # Save initial state
     await app.state.account_manager._save_state()
@@ -540,6 +541,10 @@ app = FastAPI(
     version=APP_VERSION,
     lifespan=lifespan
 )
+app.state.setup_required = _SETUP_REQUIRED
+
+from kiro.routes_setup import api_setup_guard_middleware
+app.middleware("http")(api_setup_guard_middleware)
 
 
 # --- CORS Middleware ---
@@ -733,9 +738,6 @@ if __name__ == "__main__":
     
     # Parse CLI arguments first (handles --version, --help without requiring config)
     args = parse_cli_args()
-    
-    # Run configuration validation before starting server
-    validate_configuration()
     
     # Warn about suboptimal timeout configuration
     _warn_timeout_configuration()
